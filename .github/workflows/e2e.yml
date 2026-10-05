@@ -1,0 +1,134 @@
+name: E2E
+
+# Chromium-only run against every Vercel preview deployment (keeps the public
+# repo's Actions usage reasonable even though public repos get unlimited
+# minutes -- see answer/repo-visibility). The full cross-browser matrix only
+# runs on main and nightly, where speed matters less than coverage.
+on:
+  deployment_status:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *' # 03:00 UTC nightly, matches the project's other daily jobs
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}-${{ github.event.deployment_status.environment_url || '' }}
+  cancel-in-progress: true
+
+jobs:
+  chromium-preview:
+    name: Playwright (Chromium) + axe-core against preview
+    if: github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: ${{ github.event.deployment_status.target_url }}
+      TEST_SEED_TOKEN: ${{ secrets.TEST_SEED_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22 + pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Enable Corepack / pin pnpm 9
+        run: corepack enable && corepack use pnpm@9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright (Chromium only)
+        run: pnpm exec playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+
+      - name: Seed fixtures on the preview deployment
+        run: |
+          curl -sf -X POST "$BASE_URL/api/test/seed" -H "Authorization: Bearer $TEST_SEED_TOKEN"
+
+      - name: Run Playwright + axe-core (Chromium)
+        run: pnpm exec playwright test --project=chromium
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ env.BASE_URL }}
+
+      - name: Reset seeded fixtures
+        if: always()
+        run: |
+          curl -sf -X POST "$BASE_URL/api/test/reset" -H "Authorization: Bearer $TEST_SEED_TOKEN"
+
+      - name: Upload traces/videos on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-chromium
+          path: playwright-report/
+          retention-days: 7
+
+  full-matrix:
+    name: Playwright (Chromium + WebKit + Firefox) -- main / nightly
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      TEST_SEED_TOKEN: ${{ secrets.TEST_SEED_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22 + pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Enable Corepack / pin pnpm 9
+        run: corepack enable && corepack use pnpm@9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-full-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright (all browsers)
+        run: pnpm exec playwright install --with-deps
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+
+      # On a main push the just-merged commit's own Vercel production
+      # deployment is the target; on the nightly schedule we re-test the
+      # current production URL. Either way this never touches a preview.
+      - name: Resolve base URL
+        run: echo "BASE_URL=${{ vars.PRODUCTION_URL }}" >> "$GITHUB_ENV"
+
+      - name: Seed fixtures
+        run: |
+          curl -sf -X POST "$BASE_URL/api/test/seed" -H "Authorization: Bearer $TEST_SEED_TOKEN"
+
+      - name: Run Playwright + axe-core (Chromium, WebKit, Firefox)
+        run: pnpm exec playwright test --project=chromium --project=webkit --project=firefox
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ env.BASE_URL }}
+
+      - name: Reset seeded fixtures
+        if: always()
+        run: |
+          curl -sf -X POST "$BASE_URL/api/test/reset" -H "Authorization: Bearer $TEST_SEED_TOKEN"
+
+      - name: Upload traces/videos on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-full-matrix
+          path: playwright-report/
+          retention-days: 7

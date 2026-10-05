@@ -1,0 +1,35 @@
+name: Lighthouse CI
+
+on:
+  deployment_status:
+
+concurrency:
+  group: lighthouse-${{ github.workflow }}-${{ github.event.deployment_status.environment_url || '' }}
+  cancel-in-progress: true
+
+jobs:
+  budgets:
+    name: Performance / Accessibility / Best Practices / SEO budgets
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # TODO(BLOG-6/BLOG-30): add a seeded sample-post URL here once the seed
+      # script's post slugs are known -- spec/operations' Lighthouse section
+      # asserts budgets against "/", a sample post, and "/about".
+      - name: Run Lighthouse CI against the preview deployment
+        uses: treosh/lighthouse-ci-action@v11
+        with:
+          urls: |
+            ${{ github.event.deployment_status.target_url }}/
+            ${{ github.event.deployment_status.target_url }}/about
+          configPath: ./lighthouserc.json
+          uploadArtifacts: true
+          temporaryPublicStorage: true
