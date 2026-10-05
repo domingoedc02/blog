@@ -59,6 +59,7 @@ describe('src/lib/env.ts', () => {
   it('throws a ZodError naming the missing field when AUTH_SECRET is absent', async () => {
     const { AUTH_SECRET: _omit, ...incomplete } = COMPLETE_ENV;
     process.env = { ...process.env, ...incomplete };
+    delete process.env.AUTH_SECRET; // tests/setup/test-env.ts pre-fills it
 
     await expect(import('@/lib/env')).rejects.toSatisfy((error: unknown) => {
       expect(error).toBeInstanceOf(ZodError);

@@ -19,6 +19,10 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    setupFiles: ['./tests/setup/test-env.ts'],
+    // next-auth's ESM build imports `next/server` without an extension,
+    // which Node's resolver rejects; letting Vite transform it resolves it.
+    server: { deps: { inline: ['next-auth'] } },
     include: ['tests/unit/**/*.test.ts', 'tests/integration/**/*.test.ts'],
     // The tests/integration/db/** suite (BLOG-22) shares one disposable
     // Postgres across files and spawns the real seed/migrate scripts as

@@ -1,39 +1,43 @@
+import { env } from '@/lib/env';
+
 /**
- * The env-driven author allow-list check (decision/auth, spec/security
- * threat #2: OAuth allow-list bypass). This is a REAL, complete
- * implementation, not a stub — the allow-list comparison itself (parse
- * `AUTHOR_ALLOWLIST`, compare `provider:id` pairs) has no dependency on
- * Auth.js being configured; only *wiring it into the `signIn` callback*
- * is BLOG-18's job (Auth hardening & audit logging), which hasn't landed
- * yet. BLOG-18 should import {@link isAllowListed} from here rather than
- * re-implementing the parse/compare logic — flagged in BLOG-5's PR for
- * backend-dev to coordinate on before either side merges, per team-lead's
- * note on this issue.
+ * The author allow-list (decision/auth, spec/security threat #2: OAuth
+ * allow-list bypass). One implementation, used by both enforcement points:
  *
- * `AUTHOR_ALLOWLIST` is the actual, spec/setup-confirmed env var name — a
- * comma-separated list of `provider:id` pairs (e.g.
- * `google:109283746502938475,github:8341223`), where `id` is the
- * provider's immutable account id (Google's `sub` claim, GitHub's numeric
- * account id — never a username or email, both of which can change).
- * `decision/auth` and `spec/architecture`'s own text still reference
- * older per-provider var names (`ADMIN_GOOGLE_SUB`/`ADMIN_GITHUB_ID`) that
- * were superseded by the single `AUTHOR_ALLOWLIST` var everywhere else
- * (spec/setup's env table, and every other issue reviewed against it,
- * e.g. BLOG-19/BLOG-14) — that's a stale ADR/spec cross-reference for
- * system-architect to clean up, not something this module should follow.
+ * - the Auth.js `signIn` callback (src/lib/auth/callbacks.ts) — the only
+ *   place identity is authorised at sign-in, and
+ * - the defensive re-check on every admin request
+ *   (src/lib/auth/session.ts → src/middleware.ts, and BLOG-29's per-handler
+ *   re-check), which catches a token issued before the allow-list changed.
  *
- * Takes the raw allow-list string as a parameter rather than importing
- * `src/lib/env.ts` directly, so it stays a pure, trivially-testable
- * function and so BLOG-18's `signIn` callback (which already has `env` in
- * scope) isn't forced through this module's import graph.
+ * `AUTHOR_ALLOWLIST` (spec/setup) is ONE comma-separated list of
+ * `provider:id` pairs, e.g. `google:109283746502938475,github:8341223`, where
+ * `id` is the provider's immutable account id — Google's `sub`, GitHub's
+ * numeric account id. Never an email or a username: both can change or be
+ * reused. One value is shared by preview and production
+ * (decision/ops-defaults).
+ *
+ * Providers are allow-listed independently (OR, not AND): a sign-in needs
+ * only its own provider's entry to be present and to match.
+ *
+ * Fail closed: an unset/empty allow-list, or one with no entry for a
+ * provider, matches nothing for that provider — a misconfigured deploy is
+ * loudly broken (nobody can sign in), never silently open.
  */
+
+export const AUTH_PROVIDERS = ['google', 'github'] as const;
+export type AuthProvider = (typeof AUTH_PROVIDERS)[number];
+
+export function isAuthProvider(value: unknown): value is AuthProvider {
+  return typeof value === 'string' && (AUTH_PROVIDERS as readonly string[]).includes(value);
+}
 
 export interface AllowListEntry {
   provider: string;
   id: string;
 }
 
-/** Parses `AUTHOR_ALLOWLIST`'s `provider:id,provider:id` format. Malformed entries are skipped, not thrown on. */
+/** Parses `provider:id,provider:id`. Malformed entries are skipped, never thrown on, and never widen the list. */
 export function parseAllowList(rawAllowList: string): AllowListEntry[] {
   return rawAllowList
     .split(',')
@@ -52,19 +56,24 @@ export function parseAllowList(rawAllowList: string): AllowListEntry[] {
 }
 
 /**
- * `true` if `provider:accountId` is in the allow-list. Fails closed: an
- * empty/missing `rawAllowList` (misconfiguration) never matches anything,
- * per spec/security's "fails closed if unset/empty" rule.
+ * The pure comparison, with the raw allow-list passed in. Exported for the
+ * fail-closed unit tests and for callers that already hold the value; app
+ * code should call {@link isAllowListed}.
  */
-export function isAllowListed(
+export function matchesAllowList(
   provider: string,
   accountId: string,
   rawAllowList: string | undefined,
 ): boolean {
-  if (!rawAllowList) {
+  if (!rawAllowList || !isAuthProvider(provider) || accountId.length === 0) {
     return false;
   }
   return parseAllowList(rawAllowList).some(
     (entry) => entry.provider === provider && entry.id === accountId,
   );
+}
+
+/** `true` only if `provider:accountId` is in `AUTHOR_ALLOWLIST` (read through src/lib/env.ts). */
+export function isAllowListed(provider: AuthProvider, accountId: string): boolean {
+  return matchesAllowList(provider, accountId, env.AUTHOR_ALLOWLIST);
 }

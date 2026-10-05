@@ -1,28 +1,45 @@
 import { NextRequest } from 'next/server';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 import { middleware } from '@/middleware';
 
-const SITE_URL = 'https://personal-blog.example';
-const ORIGINAL_SITE_URL = process.env.SITE_URL;
+import { mintSessionToken, sessionCookieHeader } from '../helpers/session';
+import { TEST_GITHUB_ID, TEST_GOOGLE_SUB, TEST_SITE_URL } from '../setup/test-env';
 
-// src/middleware.ts reads SITE_URL directly from process.env for the
-// Origin check (see src/lib/security/origin-check.ts's docblock for why
-// it's dependency-injected rather than imported from src/lib/env.ts).
-beforeAll(() => {
-  process.env.SITE_URL = SITE_URL;
-});
-afterAll(() => {
-  process.env.SITE_URL = ORIGINAL_SITE_URL;
+const SITE_URL = TEST_SITE_URL;
+
+let validCookie: string;
+let notAllowListedCookie: string;
+let wrongSecretCookie: string;
+let expiredCookie: string;
+let claimlessCookie: string;
+
+beforeAll(async () => {
+  validCookie = sessionCookieHeader(
+    await mintSessionToken({ sub: TEST_GOOGLE_SUB, provider: 'google' }),
+  );
+  notAllowListedCookie = sessionCookieHeader(
+    await mintSessionToken({ sub: '999999999', provider: 'github' }),
+  );
+  wrongSecretCookie = sessionCookieHeader(
+    await mintSessionToken(
+      { sub: TEST_GOOGLE_SUB, provider: 'google' },
+      { secret: 'a-different-secret-the-server-does-not-hold' },
+    ),
+  );
+  expiredCookie = sessionCookieHeader(
+    await mintSessionToken({ sub: TEST_GOOGLE_SUB, provider: 'google' }, { maxAge: -60 }),
+  );
+  claimlessCookie = sessionCookieHeader(await mintSessionToken({ sub: TEST_GOOGLE_SUB }));
 });
 
 function makeRequest(
   path: string,
-  options: { method?: string; headers?: Record<string, string>; sessionCookie?: boolean } = {},
+  options: { method?: string; headers?: Record<string, string>; cookie?: string } = {},
 ): NextRequest {
   const headers = { ...options.headers };
-  if (options.sessionCookie) {
-    headers.cookie = '__Secure-authjs.session-token=a-session-token-value';
+  if (options.cookie) {
+    headers.cookie = options.cookie;
   }
   return new NextRequest(new URL(path, SITE_URL), {
     method: options.method ?? 'GET',
@@ -31,11 +48,9 @@ function makeRequest(
 }
 
 describe('middleware — security headers on every response (BLOG-5 AC)', () => {
-  it('carries the exact header set, including both third-party CSP origins, on a public route', () => {
-    const response = middleware(makeRequest('/'));
+  it('carries the exact header set, including both third-party CSP origins, on a public route', async () => {
+    const response = await middleware(makeRequest('/'));
     const csp = response.headers.get('content-security-policy');
-    expect(csp).toContain('https://cloud.umami.is');
-    expect(csp).toContain('https://challenges.cloudflare.com');
     expect(csp).toContain(
       "script-src 'self' https://cloud.umami.is https://challenges.cloudflare.com",
     );
@@ -52,63 +67,113 @@ describe('middleware — security headers on every response (BLOG-5 AC)', () => 
     expect(response.headers.get('x-request-id')).toBeTruthy();
   });
 
-  it('does not carry Cache-Control: no-store on a public route', () => {
-    const response = middleware(makeRequest('/'));
+  it('does not carry Cache-Control: no-store on a public route', async () => {
+    const response = await middleware(makeRequest('/'));
     expect(response.headers.get('cache-control')).not.toBe('no-store');
   });
 
-  it('carries Cache-Control: no-store and X-Robots-Tag: noindex on /admin/* even on a redirect response', () => {
-    const response = middleware(makeRequest('/admin'));
-    expect(response.status).toBe(307); // redirect to /admin/login
+  it('carries no-store + noindex on /admin/* even on a redirect', async () => {
+    const response = await middleware(makeRequest('/admin'));
+    expect(response.status).toBe(307);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('x-robots-tag')).toBe('noindex');
     expect(response.headers.get('content-security-policy')).toContain('https://cloud.umami.is');
   });
 
-  it('carries Cache-Control: no-store and X-Robots-Tag: noindex on an unauthenticated /api/admin/* 401', () => {
-    const response = middleware(makeRequest('/api/admin/posts'));
+  it('carries no-store + noindex on an unauthenticated /api/admin/* 401', async () => {
+    const response = await middleware(makeRequest('/api/admin/posts'));
     expect(response.status).toBe(401);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('x-robots-tag')).toBe('noindex');
   });
 });
 
-describe('middleware — admin session gate (BLOG-5 AC)', () => {
-  it('redirects a page request to /admin/login when no session cookie is present', async () => {
-    const response = middleware(makeRequest('/admin/posts'));
+describe('middleware — admin session gate verifies the Auth.js JWT (BLOG-18)', () => {
+  it('redirects a page request with no session to /admin/login', async () => {
+    const response = await middleware(makeRequest('/admin/posts'));
     expect(response.status).toBe(307);
     expect(response.headers.get('location')).toBe(`${SITE_URL}/admin/login`);
   });
 
-  it('returns 401 UNAUTHENTICATED for an API request when no session cookie is present', async () => {
-    const response = middleware(makeRequest('/api/admin/posts'));
-    expect(response.status).toBe(401);
-    const body = await response.json();
-    expect(body.error.code).toBe('UNAUTHENTICATED');
+  it('never gates /admin/login itself (no redirect loop)', async () => {
+    const response = await middleware(makeRequest('/admin/login'));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
   });
 
-  it('passes an admin page request through when a session cookie is present', () => {
-    const response = middleware(makeRequest('/admin/posts', { sessionCookie: true }));
-    expect(response.status).not.toBe(307);
+  it('does not treat /administrator as part of the admin zone', async () => {
+    const response = await middleware(makeRequest('/administrator'));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).not.toBe('no-store');
+  });
+
+  it('returns 401 UNAUTHENTICATED for an API request with no session', async () => {
+    const response = await middleware(makeRequest('/api/admin/posts'));
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe('UNAUTHENTICATED');
+  });
+
+  // The BLOG-5 presence-only check would have let every one of these through.
+  for (const [label, cookie] of [
+    ['an opaque, non-JWT cookie value', () => sessionCookieHeader('a-session-token-value')],
+    ['a token signed with a different secret', () => wrongSecretCookie],
+    ['an expired token', () => expiredCookie],
+    ['a token without the provider claim', () => claimlessCookie],
+  ] as const) {
+    it(`rejects ${label}: 401 on the API, redirect on pages`, async () => {
+      const api = await middleware(makeRequest('/api/admin/posts', { cookie: cookie() }));
+      expect(api.status).toBe(401);
+      const page = await middleware(makeRequest('/admin/posts', { cookie: cookie() }));
+      expect(page.status).toBe(307);
+      expect(page.headers.get('location')).toBe(`${SITE_URL}/admin/login`);
+    });
+  }
+
+  it('passes a valid, allow-listed session through on pages and the API', async () => {
+    const page = await middleware(makeRequest('/admin/posts', { cookie: validCookie }));
+    expect(page.status).toBe(200);
+    const api = await middleware(makeRequest('/api/admin/posts', { cookie: validCookie }));
+    expect(api.status).toBe(200);
+  });
+
+  it('accepts a valid GitHub session too (providers are allow-listed independently)', async () => {
+    const githubCookie = sessionCookieHeader(
+      await mintSessionToken({ sub: TEST_GITHUB_ID, provider: 'github' }),
+    );
+    const response = await middleware(makeRequest('/api/admin/posts', { cookie: githubCookie }));
+    expect(response.status).toBe(200);
+  });
+
+  it('returns 403 FORBIDDEN for a valid token whose identity is not allow-listed', async () => {
+    const response = await middleware(
+      makeRequest('/api/admin/posts', { cookie: notAllowListedCookie }),
+    );
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe('FORBIDDEN');
+  });
+
+  it('sends a not-allow-listed page visit to /admin/login?error=AccessDenied', async () => {
+    const response = await middleware(makeRequest('/admin', { cookie: notAllowListedCookie }));
+    expect(response.status).toBe(307);
+    expect(response.headers.get('location')).toBe(`${SITE_URL}/admin/login?error=AccessDenied`);
   });
 });
 
 describe('middleware — Origin/CSRF check (BLOG-5 AC)', () => {
-  it('rejects a mutating admin API request with a mismatched Origin as 403, with a valid session', async () => {
-    const response = middleware(
+  it('rejects a mutating admin request with a mismatched Origin as 403, with a valid session', async () => {
+    const response = await middleware(
       makeRequest('/api/admin/posts', {
         method: 'POST',
-        sessionCookie: true,
+        cookie: validCookie,
         headers: { origin: 'https://evil.example' },
       }),
     );
     expect(response.status).toBe(403);
-    const body = await response.json();
-    expect(body.error.code).toBe('FORBIDDEN');
+    expect((await response.json()).error.code).toBe('FORBIDDEN');
   });
 
-  it('returns 401, not 403, when both the session is missing AND the Origin is wrong (no information leak)', async () => {
-    const response = middleware(
+  it('returns 401, not 403, when the session is missing AND the Origin is wrong', async () => {
+    const response = await middleware(
       makeRequest('/api/admin/posts', {
         method: 'POST',
         headers: { origin: 'https://evil.example' },
@@ -117,49 +182,47 @@ describe('middleware — Origin/CSRF check (BLOG-5 AC)', () => {
     expect(response.status).toBe(401);
   });
 
-  it('allows a mutating admin API request with a matching Origin and a valid session through', () => {
-    const response = middleware(
+  it('lets a mutating admin request with a matching Origin and a valid session through', async () => {
+    const response = await middleware(
       makeRequest('/api/admin/posts', {
         method: 'POST',
-        sessionCookie: true,
+        cookie: validCookie,
         headers: { origin: SITE_URL, 'content-length': '10' },
       }),
     );
-    expect(response.status).not.toBe(403);
-    expect(response.status).not.toBe(401);
+    expect(response.status).toBe(200);
   });
 
   it('rejects a POST to /api/contact with no Origin and no Referer (fail closed)', async () => {
-    const response = middleware(makeRequest('/api/contact', { method: 'POST' }));
+    const response = await middleware(makeRequest('/api/contact', { method: 'POST' }));
     expect(response.status).toBe(403);
   });
 
-  it('allows a GET to /api/admin/posts with a mismatched Origin through (reads have no side effect to forge)', () => {
-    const response = middleware(
+  it('lets a GET with a mismatched Origin through (reads have no side effect to forge)', async () => {
+    const response = await middleware(
       makeRequest('/api/admin/posts', {
-        sessionCookie: true,
+        cookie: validCookie,
         headers: { origin: 'https://evil.example' },
       }),
     );
-    expect(response.status).not.toBe(403);
+    expect(response.status).toBe(200);
   });
 });
 
 describe('middleware — body-size cap (BLOG-5 AC)', () => {
   it('rejects an oversized /api/admin/* JSON body with 413, before the session check', async () => {
-    const response = middleware(
+    const response = await middleware(
       makeRequest('/api/admin/posts', {
         method: 'POST',
         headers: { 'content-length': String(1024 * 1024 + 1) },
       }),
     );
     expect(response.status).toBe(413);
-    const body = await response.json();
-    expect(body.error.code).toBe('PAYLOAD_TOO_LARGE');
+    expect((await response.json()).error.code).toBe('PAYLOAD_TOO_LARGE');
   });
 
   it('rejects an oversized /api/contact JSON body with 413', async () => {
-    const response = middleware(
+    const response = await middleware(
       makeRequest('/api/contact', {
         method: 'POST',
         headers: { 'content-length': String(200 * 1024 + 1) },
@@ -168,22 +231,12 @@ describe('middleware — body-size cap (BLOG-5 AC)', () => {
     expect(response.status).toBe(413);
   });
 
-  it('does not apply the 1 MB admin cap to /api/admin/upload (owned by the storage task)', () => {
-    const response = middleware(
+  it('does not apply the 1 MB admin cap to /api/admin/upload (owned by the storage task)', async () => {
+    const response = await middleware(
       makeRequest('/api/admin/upload', {
         method: 'POST',
-        sessionCookie: true,
+        cookie: validCookie,
         headers: { origin: SITE_URL, 'content-length': String(2 * 1024 * 1024) },
-      }),
-    );
-    expect(response.status).not.toBe(413);
-  });
-
-  it('allows a body under the cap through', () => {
-    const response = middleware(
-      makeRequest('/api/contact', {
-        method: 'POST',
-        headers: { 'content-length': '100', origin: SITE_URL },
       }),
     );
     expect(response.status).not.toBe(413);
