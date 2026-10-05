@@ -4,7 +4,10 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import type { z, ZodSchema } from 'zod';
 
+import { verifyAdminSession, type AdminSessionResult } from '@/lib/auth/session';
+import { env } from '@/lib/env';
 import {
+  ForbiddenError,
   RateLimitError,
   UnauthenticatedError,
   ValidationError,
@@ -160,28 +163,45 @@ export function withRoute<
 }
 
 /**
- * Fail-closed composition point for pipeline step 6 (session/auth), for a
- * Route Handler to compose around {@link withRoute} (BLOG-5 already wires
- * the equivalent gate at the `/admin/*` middleware level; this is the
- * same fail-closed stub for individual `/api/admin/*` route handlers).
- * Always rejects with 401 until BLOG-18 (Auth hardening, reassigned to
- * frontend-dev) lands the real Auth.js session check — a route that
- * composes this is loudly broken (every request 401s) rather than
- * silently unprotected, per this issue's explicit design decision.
+ * Pipeline steps 6 and 8 (session + allow-list) for an individual
+ * `/api/admin/*` Route Handler, composed around {@link withRoute}:
+ * `export const POST = withAuth(withRoute(handler, options))`.
  *
- * TODO(BLOG-18): replace the body with a real session check, reusing
- * BLOG-5's `src/lib/auth/allow-list.ts` rather than writing a second one.
+ * Middleware is the first gate; this is the per-handler server-side
+ * re-check (spec/security: "Every `/api/admin/*` handler re-checks the
+ * session server-side on each request"). Both call the same
+ * `verifyAdminSession()` (src/lib/auth/session.ts, BLOG-18), so the check
+ * is written once:
+ *
+ * - no/tampered/expired/wrong-secret Auth.js JWT → 401 `UNAUTHENTICATED`
+ * - valid JWT whose identity is no longer in `AUTHOR_ALLOWLIST` → 403
+ *   `FORBIDDEN`
+ * - otherwise the wrapped route runs.
+ *
+ * Any failure inside the check itself fails closed as a 401.
  */
-export function withAuth<Context>(_route: WrappedRoute<Context>): WrappedRoute<Context> {
-  // `_route` is deliberately unused: this stub never calls through to the
-  // wrapped route, by design, until BLOG-18 lands the real check.
-  return async (_request: NextRequest, _context: Context): Promise<NextResponse> => {
-    const mapped = toErrorResponse(
-      new UnauthenticatedError(
-        'Session verification is not wired yet (pending BLOG-18) — failing closed.',
-      ),
-    );
-    return errorToNextResponse(mapped);
+export function withAuth<Context>(route: WrappedRoute<Context>): WrappedRoute<Context> {
+  return async (request: NextRequest, context: Context): Promise<NextResponse> => {
+    let result: AdminSessionResult;
+    try {
+      result = await verifyAdminSession(request, {
+        secret: env.AUTH_SECRET,
+        siteUrl: env.SITE_URL,
+        allowList: env.AUTHOR_ALLOWLIST,
+      });
+    } catch {
+      result = { status: 'unauthenticated' };
+    }
+
+    if (result.status === 'unauthenticated') {
+      return errorToNextResponse(toErrorResponse(new UnauthenticatedError('Sign in required.')));
+    }
+    if (result.status === 'forbidden') {
+      return errorToNextResponse(
+        toErrorResponse(new ForbiddenError('This account is not allowed here.')),
+      );
+    }
+    return route(request, context);
   };
 }
 

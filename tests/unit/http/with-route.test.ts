@@ -16,6 +16,9 @@ import {
 } from '@/lib/http/with-route';
 import { ADMIN_JSON_BODY_LIMIT_BYTES, CONTACT_BODY_LIMIT_BYTES } from '@/lib/security/body-limits';
 
+import { mintSessionToken, sessionCookieHeader } from '../../helpers/session';
+import { TEST_GOOGLE_SUB } from '../../setup/test-env';
+
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
 /**
@@ -242,13 +245,52 @@ describe('withRoute body schema (BLOG-29 AC7)', () => {
   });
 });
 
-describe('withAuth / withRateLimit fail-closed stubs', () => {
-  it('withAuth always rejects 401 (pending BLOG-18)', async () => {
-    const protectedRoute = withAuth(withRoute(() => NextResponse.json({ ok: true })));
-    const response = await protectedRoute(new NextRequest('http://localhost/api/admin/posts'), {});
+describe('withAuth — real Auth.js session check (BLOG-18)', () => {
+  const ok = () => withAuth(withRoute(() => NextResponse.json({ ok: true })));
+  const requestWith = (cookie?: string) =>
+    new NextRequest('https://personal-blog.example/api/admin/posts', {
+      headers: cookie ? { cookie } : {},
+    });
+
+  it('rejects 401 UNAUTHENTICATED with no session, without calling the route', async () => {
+    let called = false;
+    const route = withAuth(
+      withRoute(() => {
+        called = true;
+        return NextResponse.json({ ok: true });
+      }),
+    );
+    const response = await route(requestWith(), {});
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe('UNAUTHENTICATED');
+    expect(called).toBe(false);
+  });
+
+  it('rejects 401 for a token signed with another secret', async () => {
+    const token = await mintSessionToken(
+      { sub: TEST_GOOGLE_SUB, provider: 'google' },
+      { secret: 'rotated-away-secret' },
+    );
+    const response = await ok()(requestWith(sessionCookieHeader(token)), {});
     expect(response.status).toBe(401);
   });
 
+  it('rejects 403 FORBIDDEN for a valid token that is not allow-listed', async () => {
+    const token = await mintSessionToken({ sub: '1', provider: 'github' });
+    const response = await ok()(requestWith(sessionCookieHeader(token)), {});
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe('FORBIDDEN');
+  });
+
+  it('calls the wrapped route for a valid, allow-listed session', async () => {
+    const token = await mintSessionToken({ sub: TEST_GOOGLE_SUB, provider: 'google' });
+    const response = await ok()(requestWith(sessionCookieHeader(token)), {});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+  });
+});
+
+describe('withRateLimit fail-closed stub', () => {
   it('withRateLimit always rejects 429 with Retry-After (pending BLOG-9)', async () => {
     const limitedRoute = withRateLimit(withRoute(() => NextResponse.json({ ok: true })));
     const response = await limitedRoute(new NextRequest('http://localhost/api/contact'), {});

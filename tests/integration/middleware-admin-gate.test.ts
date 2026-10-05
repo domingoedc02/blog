@@ -3,29 +3,40 @@ import { describe, expect, it } from 'vitest';
 
 import { middleware } from '@/middleware';
 
-/**
- * BLOG-5's AC names this file for "hits `/admin` and `/api/admin/posts`
- * with no cookie and asserts redirect/401 respectively." There is no real
- * `/admin` page or `/api/admin/posts` route handler yet (BLOG-18/BLOG-29,
- * neither landed) to run a true end-to-end HTTP test against, so this
- * exercises the same middleware logic directly — once those routes
- * exist, add a real `next start` + `fetch` version alongside this one
- * (the pattern tests/integration/headers.test.ts already uses for the
- * public side) rather than replacing it.
- */
-const SITE_URL = 'https://personal-blog.example';
+import { mintSessionToken, sessionCookieHeader } from '../helpers/session';
+import { TEST_GOOGLE_SUB, TEST_SITE_URL } from '../setup/test-env';
 
-describe('admin route gate — no session cookie', () => {
-  it('GET /admin redirects to /admin/login', () => {
-    const response = middleware(new NextRequest(new URL('/admin', SITE_URL)));
+/**
+ * BLOG-5 AC: `/admin` and `/api/admin/posts` with no cookie → redirect / 401.
+ * BLOG-18 adds: the same paths with a real Auth.js session pass through.
+ * No `/admin` page or `/api/admin/posts` handler exists yet, so this drives
+ * the middleware directly; once those routes land, add a `next start` +
+ * `fetch` version alongside it (tests/integration/headers.test.ts pattern).
+ */
+const SITE_URL = TEST_SITE_URL;
+
+describe('admin route gate', () => {
+  it('GET /admin with no session redirects to /admin/login', async () => {
+    const response = await middleware(new NextRequest(new URL('/admin', SITE_URL)));
     expect(response.status).toBe(307);
     expect(response.headers.get('location')).toBe(`${SITE_URL}/admin/login`);
   });
 
-  it('GET /api/admin/posts returns 401 UNAUTHENTICATED', async () => {
-    const response = middleware(new NextRequest(new URL('/api/admin/posts', SITE_URL)));
+  it('GET /api/admin/posts with no session returns 401 UNAUTHENTICATED', async () => {
+    const response = await middleware(new NextRequest(new URL('/api/admin/posts', SITE_URL)));
     expect(response.status).toBe(401);
-    const body = await response.json();
-    expect(body).toEqual({ error: { code: 'UNAUTHENTICATED', message: 'Sign in required.' } });
+    expect(await response.json()).toEqual({
+      error: { code: 'UNAUTHENTICATED', message: 'Sign in required.' },
+    });
+  });
+
+  it('GET /admin with a valid allow-listed session passes through', async () => {
+    const cookie = sessionCookieHeader(
+      await mintSessionToken({ sub: TEST_GOOGLE_SUB, provider: 'google' }),
+    );
+    const response = await middleware(
+      new NextRequest(new URL('/admin', SITE_URL), { headers: { cookie } }),
+    );
+    expect(response.status).toBe(200);
   });
 });

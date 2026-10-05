@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
+import { verifyAdminSession } from '@/lib/auth/session';
+import { env } from '@/lib/env';
 import { ForbiddenError } from '@/lib/errors';
 import { ADMIN_JSON_BODY_LIMIT_BYTES, CONTACT_BODY_LIMIT_BYTES } from '@/lib/security/body-limits';
 import {
@@ -12,61 +14,46 @@ import { assertSameOrigin } from '@/lib/security/origin-check';
 
 /**
  * The global security layer in front of every admin page and every
- * `/api/*` route (spec/architecture's request pipeline, spec/security's
- * Middleware & headers / Input validation / threat model #3 and #9).
- * Public content pages carry none of this — static/ISR HTML from the CDN
- * (decision/rendering-caching) — the `matcher` below still runs on them
- * for the request-id + header stamping, but every other check below
- * early-exits for a non-admin, non-API path.
+ * `/api/*` route (spec/architecture's request pipeline; spec/security's
+ * Middleware & headers, Session & token handling, threats #3 and #9).
+ * Public content pages get only the request id and security headers.
  *
- * Order (per the issue's Technical design, matching spec/architecture's
- * numbered pipeline): headers set first → body-size check → admin session
- * gate → Origin/CSRF check (mutating methods only) → defensive allow-list
- * re-check (admin API only) → pass through. Session check runs BEFORE the
- * Origin check on admin routes so an unauthenticated cross-site request
- * gets a generic 401, never a 403 that would leak "there is a valid
- * session, just the wrong origin" to a prober (spec/security).
+ * Order: headers on every response → body-size cap (step 4) → session
+ * (step 6) → Origin/CSRF (step 7, mutating methods only) → allow-list
+ * re-check (step 8) → pass through.
  *
- * KNOWN GAP, documented rather than silently skipped (BLOG-5's own
- * Dependencies section sanctions this): `src/lib/auth/allow-list.ts`'s
- * `isAllowListed()` is a complete, tested, real implementation, but
- * BLOG-18 (Auth hardening & audit logging) — which configures Auth.js
- * and hasn't landed yet — is what will give this middleware a *decoded*
- * session (provider + account id) to check it against. Until then:
- *   - The admin session gate below only checks that the Auth.js session
- *     COOKIE IS PRESENT (`hasSessionCookie`), not that its JWT is
- *     cryptographically valid.
- *   - The step-8 defensive allow-list re-check is not wired at all (there
- *     is no decoded identity yet to check) — see the TODO at its call site.
- * BLOG-18 should replace `hasSessionCookie` with `next-auth/jwt`'s
- * `getToken()` (returning the decoded token) and then call
- * `isAllowListed(token.provider, token.sub, process.env.AUTHOR_ALLOWLIST)`
- * where this file's TODO marks it.
+ * Session (BLOG-18): the Auth.js v5 JWT is decrypted and verified with
+ * `AUTH_SECRET` — signature, expiry and the `provider`/`sub` claims — by
+ * `verifyAdminSession()` (src/lib/auth/session.ts), the same helper the
+ * per-handler re-check uses. A missing, tampered, expired or
+ * wrong-secret token is unauthenticated: admin pages redirect to
+ * `/admin/login`, `/api/admin/*` returns 401. A valid token whose identity
+ * is no longer in `AUTHOR_ALLOWLIST` is forbidden: 403 on the API, and a
+ * redirect to `/admin/login?error=AccessDenied` for pages. This replaces
+ * BLOG-5's presence-only cookie check.
+ *
+ * The session is checked before the Origin check so an unauthenticated
+ * cross-site request gets a generic 401, never a 403 that would confirm a
+ * session exists. Middleware is the first gate, not the only one: every
+ * `/api/admin/*` handler re-checks the session server-side (BLOG-29).
  */
 
 const REQUEST_ID_HEADER = 'x-request-id';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const LOGIN_PATH = '/admin/login';
 
 // Per spec/architecture's request-pipeline step 4. `/api/admin/upload`'s
-// 8 MB cap is explicitly out of scope here (this issue's Scope boundary
+// 8 MB cap is explicitly out of scope here (BLOG-5's Scope boundary
 // note) — owned by lib/storage/upload.ts (BLOG-25).
 // Values live in src/lib/security/body-limits.ts, shared with the
 // Route Handler wrapper (src/lib/http/with-route.ts) so both layers agree.
 
-// decision/auth's documented Auth.js v5 cookie name (Secure in
-// production/preview over HTTPS, the non-`__Secure-` prefixed name in
-// local HTTP dev).
-const SESSION_COOKIE_NAMES = ['__Secure-authjs.session-token', 'authjs.session-token'];
-
-function hasSessionCookie(request: NextRequest): boolean {
-  return SESSION_COOKIE_NAMES.some((name) => {
-    const value = request.cookies.get(name)?.value;
-    return typeof value === 'string' && value.length > 0;
-  });
+function isUnder(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 
 function applyHeaders(response: NextResponse, extra: readonly SecurityHeader[] = []): NextResponse {
-  for (const header of buildSecurityHeaders(process.env.R2_PUBLIC_BASE_URL)) {
+  for (const header of buildSecurityHeaders(env.R2_PUBLIC_BASE_URL)) {
     response.headers.set(header.key, header.value);
   }
   for (const header of extra) {
@@ -79,14 +66,14 @@ function jsonError(status: number, code: string, message: string): NextResponse 
   return NextResponse.json({ error: { code, message } }, { status });
 }
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const requestId = request.headers.get(REQUEST_ID_HEADER) ?? crypto.randomUUID();
   const { pathname } = request.nextUrl;
 
-  const isAdminPage = pathname.startsWith('/admin');
-  const isAdminApi = pathname.startsWith('/api/admin');
-  const isAdminUpload =
-    pathname === '/api/admin/upload' || pathname.startsWith('/api/admin/upload/');
+  const isAdminPage = isUnder(pathname, '/admin');
+  const isLoginPage = isUnder(pathname, LOGIN_PATH);
+  const isAdminApi = isUnder(pathname, '/api/admin');
+  const isAdminUpload = isUnder(pathname, '/api/admin/upload');
   const isContactApi = pathname === '/api/contact';
   const adminHeaders = isAdminPage || isAdminApi ? ADMIN_ONLY_HEADERS : [];
 
@@ -96,7 +83,7 @@ export function middleware(request: NextRequest) {
     return response;
   };
 
-  // --- Step: body-size cap (admin JSON + contact JSON routes only) ---
+  // --- Step 4: body-size cap (admin JSON + contact JSON routes only) ---
   if ((isAdminApi && !isAdminUpload) || isContactApi) {
     const limit = isContactApi ? CONTACT_BODY_LIMIT_BYTES : ADMIN_JSON_BODY_LIMIT_BYTES;
     const contentLength = request.headers.get('content-length');
@@ -111,20 +98,31 @@ export function middleware(request: NextRequest) {
     }
   }
 
-  // --- Step: admin session gate (/admin/* pages, /api/admin/* routes) ---
-  if (isAdminPage || isAdminApi) {
-    if (!hasSessionCookie(request)) {
-      if (isAdminPage) {
-        return respond(NextResponse.redirect(new URL('/admin/login', request.url)));
-      }
+  // --- Step 6: session — Auth.js JWT verified (signature + expiry + claims) ---
+  // The login page itself is exempt, or an unauthenticated visit would
+  // redirect to itself forever.
+  const gated = (isAdminPage && !isLoginPage) || isAdminApi;
+  const session = gated
+    ? await verifyAdminSession(request, {
+        secret: env.AUTH_SECRET,
+        siteUrl: env.SITE_URL,
+        allowList: env.AUTHOR_ALLOWLIST,
+      })
+    : null;
+
+  if (session?.status === 'unauthenticated') {
+    if (isAdminApi) {
       return respond(jsonError(401, 'UNAUTHENTICATED', 'Sign in required.'));
     }
+    return respond(NextResponse.redirect(new URL(LOGIN_PATH, request.url)));
   }
 
-  // --- Step: Origin/CSRF check (mutating methods, /api/admin/* + /api/contact only) ---
+  // --- Step 7: Origin/CSRF check (mutating methods, /api/admin/* + /api/contact only) ---
+  // Runs after the session check so an unauthenticated cross-site request
+  // gets a generic 401, never a 403 that would confirm a session exists.
   if ((isAdminApi || isContactApi) && MUTATING_METHODS.has(request.method)) {
     try {
-      assertSameOrigin(request, process.env.SITE_URL ?? '');
+      assertSameOrigin(request, env.SITE_URL);
     } catch (error) {
       if (error instanceof ForbiddenError) {
         return respond(jsonError(403, 'FORBIDDEN', error.message));
@@ -133,11 +131,17 @@ export function middleware(request: NextRequest) {
     }
   }
 
-  // --- Step: defensive allow-list re-check (/api/admin/* only) ---
-  // TODO(BLOG-18): once Auth.js is configured, decode the session here
-  // (next-auth/jwt's getToken()) and call
-  // isAllowListed(token.provider, token.sub, process.env.AUTHOR_ALLOWLIST),
-  // responding 403 FORBIDDEN on a false — see this file's docblock.
+  // --- Step 8: defensive allow-list re-check ---
+  // A validly signed token whose identity is no longer allow-listed (the
+  // allow-list changed after it was issued).
+  if (session?.status === 'forbidden') {
+    if (isAdminApi) {
+      return respond(jsonError(403, 'FORBIDDEN', 'This account is not allowed here.'));
+    }
+    const login = new URL(LOGIN_PATH, request.url);
+    login.searchParams.set('error', 'AccessDenied');
+    return respond(NextResponse.redirect(login));
+  }
 
   // --- Pass through ---
   const requestHeaders = new Headers(request.headers);

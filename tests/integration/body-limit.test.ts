@@ -20,30 +20,33 @@ const SITE_URL = 'https://personal-blog.example';
 function postWithContentLength(path: string, bytes: number): NextRequest {
   return new NextRequest(new URL(path, SITE_URL), {
     method: 'POST',
-    headers: { 'content-length': String(bytes), cookie: '__Secure-authjs.session-token=x' },
+    headers: {
+      'content-length': String(bytes),
+      cookie: '__Secure-authjs.session-token=not-a-real-jwt',
+    },
   });
 }
 
 describe('body-size cap — 413 before the body would be parsed', () => {
   it('rejects a 1 MB + 1 byte /api/admin/posts body with 413 PAYLOAD_TOO_LARGE', async () => {
-    const response = middleware(postWithContentLength('/api/admin/posts', 1024 * 1024 + 1));
+    const response = await middleware(postWithContentLength('/api/admin/posts', 1024 * 1024 + 1));
     expect(response.status).toBe(413);
     const body = await response.json();
     expect(body.error.code).toBe('PAYLOAD_TOO_LARGE');
   });
 
-  it('accepts a 1 MB /api/admin/posts body (at the boundary, not over it)', () => {
-    const response = middleware(postWithContentLength('/api/admin/posts', 1024 * 1024));
+  it('accepts a 1 MB /api/admin/posts body (at the boundary, not over it)', async () => {
+    const response = await middleware(postWithContentLength('/api/admin/posts', 1024 * 1024));
     expect(response.status).not.toBe(413);
   });
 
   it('rejects a 200 KB + 1 byte /api/contact body with 413 PAYLOAD_TOO_LARGE', async () => {
-    const response = middleware(postWithContentLength('/api/contact', 200 * 1024 + 1));
+    const response = await middleware(postWithContentLength('/api/contact', 200 * 1024 + 1));
     expect(response.status).toBe(413);
   });
 
-  it('accepts a 200 KB /api/contact body (at the boundary, not over it)', () => {
-    const response = middleware(postWithContentLength('/api/contact', 200 * 1024));
+  it('accepts a 200 KB /api/contact body (at the boundary, not over it)', async () => {
+    const response = await middleware(postWithContentLength('/api/contact', 200 * 1024));
     expect(response.status).not.toBe(413);
   });
 });
