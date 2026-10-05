@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: blog
+      POSTGRES_PASSWORD: blog_dev_password
+      POSTGRES_DB: blog
+    ports:
+      - '5432:5432'
+    volumes:
+      - blog_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U blog -d blog']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # MinIO (the local R2 stand-in) is added by the storage module task
+  # (BLOG-25) — this file only needs Postgres for the database layer.
+
+volumes:
+  blog_postgres_data:

@@ -20,5 +20,12 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/unit/**/*.test.ts', 'tests/integration/**/*.test.ts'],
+    // The tests/integration/db/** suite (BLOG-22) shares one disposable
+    // Postgres across files and spawns the real seed/migrate scripts as
+    // child processes; running test files in parallel would let them
+    // stomp on each other's rows/migrations table. Headers.test.ts
+    // (BLOG-19) also spawns a real dev server — sequential execution
+    // keeps all of this deterministic at the cost of a slower run.
+    fileParallelism: false,
   },
 });
