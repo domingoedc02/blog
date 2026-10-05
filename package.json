@@ -30,6 +30,8 @@
     "@tiptap/extension-link": "^2",
     "@tiptap/html": "^2",
     "@tiptap/starter-kit": "^2",
+    "@upstash/ratelimit": "2.2.0",
+    "@upstash/redis": "1.39.0",
     "drizzle-orm": "^0.38.3",
     "next": "15.5.27",
     "next-auth": "5.0.0-beta.32",
@@ -69,6 +71,12 @@
   "pnpm": {
     "overrides": {
       "postcss": ">=8.5.23"
+    },
+    "auditConfig": {
+      "//": "GHSA-gpj5-g38j-94v9 ignored: not exploitable (no sql.identifier/raw/.as on user input); tracked in BLOG-135; remove by 2026-11-02",
+      "ignoreGhsas": [
+        "GHSA-gpj5-g38j-94v9"
+      ]
     }
   }
 }
