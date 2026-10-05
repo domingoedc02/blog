@@ -4,14 +4,39 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import type { z, ZodSchema } from 'zod';
 
-import { RateLimitError, UnauthenticatedError, toErrorResponse } from '@/lib/errors';
+import {
+  RateLimitError,
+  UnauthenticatedError,
+  ValidationError,
+  toErrorResponse,
+} from '@/lib/errors';
 import type { ErrorResponse } from '@/lib/errors';
+import { ADMIN_JSON_BODY_LIMIT_BYTES } from '@/lib/security/body-limits';
 
 import { readLimitedBody } from './body-limit';
 import { logger } from './logger';
 
-/** 1 MB — the admin JSON default per spec/architecture's body-limit table. */
-export const DEFAULT_BODY_LIMIT_BYTES = 1_000_000;
+/**
+ * Default cap: the admin JSON limit, from the one shared constant set
+ * (src/lib/security/body-limits.ts) the Edge middleware also uses.
+ */
+export const DEFAULT_BODY_LIMIT_BYTES = ADMIN_JSON_BODY_LIMIT_BYTES;
+
+/**
+ * Parses a request body as JSON. A malformed body is a client error, not a
+ * server fault: it's rethrown as `400 VALIDATION_ERROR` instead of letting
+ * the raw `SyntaxError` fall through to the generic 500 branch.
+ */
+function parseJsonBody(text: string): unknown {
+  if (text.length === 0) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ValidationError('Request body is not valid JSON.', 'VALIDATION_ERROR');
+  }
+}
 
 /**
  * Builds a `NextResponse` from a mapped error, only including `headers` in
@@ -106,7 +131,7 @@ export function withRoute<
       if (options.bodySchema) {
         const limit = options.bodyLimitBytes ?? DEFAULT_BODY_LIMIT_BYTES;
         const text = await readLimitedBody(request, limit);
-        const json = text.length > 0 ? JSON.parse(text) : undefined;
+        const json = parseJsonBody(text);
         body = options.bodySchema.parse(json) as Infer<BodySchema>;
       }
 

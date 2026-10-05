@@ -5,9 +5,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { POST } from '@/app/api/contact/route';
 import { readLimitedBody } from '@/lib/http/body-limit';
 import { logger } from '@/lib/http/logger';
-import { withAuth, withRateLimit, withRoute } from '@/lib/http/with-route';
+import {
+  DEFAULT_BODY_LIMIT_BYTES,
+  withAuth,
+  withRateLimit,
+  withRoute,
+} from '@/lib/http/with-route';
+import { ADMIN_JSON_BODY_LIMIT_BYTES, CONTACT_BODY_LIMIT_BYTES } from '@/lib/security/body-limits';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
@@ -160,6 +167,54 @@ describe('withRoute logging (BLOG-29 AC5)', () => {
         err: expect.objectContaining({ message: 'db exploded' }),
       }),
     );
+  });
+});
+
+describe('withRoute malformed JSON (devops review fix)', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined as never);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('a body that is not valid JSON is a 400 VALIDATION_ERROR, not a 500, and the handler never runs', async () => {
+    const handler = vi.fn(() => NextResponse.json({ ok: true }));
+    const route = withRoute(handler, { bodySchema: z.object({ title: z.string() }) });
+
+    const request = new NextRequest('http://localhost/api/admin/posts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"title": "unterminated',
+    });
+
+    const response = await route(request, {});
+    const json = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(json.error.code).toBe('VALIDATION_ERROR');
+    expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('shared body-limit constants (devops review fix)', () => {
+  it('withRoute defaults to the same admin JSON cap the Edge middleware uses', () => {
+    expect(DEFAULT_BODY_LIMIT_BYTES).toBe(ADMIN_JSON_BODY_LIMIT_BYTES);
+    expect(ADMIN_JSON_BODY_LIMIT_BYTES).toBe(1024 * 1024);
+    expect(CONTACT_BODY_LIMIT_BYTES).toBe(200 * 1024);
+  });
+});
+
+describe('POST /api/contact placeholder (devops review fix)', () => {
+  it('answers 501 NOT_IMPLEMENTED and never claims the message was sent', async () => {
+    const response = POST();
+    const json = await response.json();
+    expect(response.status).toBe(501);
+    expect(json.error.code).toBe('NOT_IMPLEMENTED');
+    expect(json).not.toHaveProperty('ok');
   });
 });
 

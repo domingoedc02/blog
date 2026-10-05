@@ -1,37 +1,26 @@
 import { NextResponse } from 'next/server';
 
-import { ValidationError } from '@/lib/errors';
-import { withRateLimit, withRoute } from '@/lib/http/with-route';
-import { contactSchema } from '@/lib/validation/contact';
-
 /**
- * `POST /api/contact` (spec/api). Skeleton only: validates the envelope
- * and the honeypot, then responds `202`. The real business logic — the
- * Turnstile `siteverify` call and the Resend send, and the `502
- * UPSTREAM_ERROR` path when Resend fails — is a future story (BLOG-16);
- * this task's job is only to establish the canonical `withRoute` shape a
- * future route handler fills in, per spec/file-structure's "copy the shape
- * of an existing route" rule.
+ * `POST /api/contact`: placeholder only. It returns `501 NOT_IMPLEMENTED`
+ * in spec/api's error envelope and has no logic.
  *
- * Wrapped in {@link withRateLimit}: spec/api fixes a real 5-requests/
- * 10-minutes/IP limit here, but the actual Upstash limiter is BLOG-9's
- * (abuse protection) job. Until that lands, this route fails closed with
- * `429` on every call — intentionally loud rather than silently
- * unprotected (this task's design decision, see with-route.ts).
+ * It deliberately does NOT validate, run the honeypot check or answer
+ * `202`. A `202 {ok:true}` with no send behind it would tell readers their
+ * message was sent while silently dropping it. The real handler (zod
+ * validation via `src/lib/validation/contact.ts`, honeypot, rate limit,
+ * Turnstile `siteverify`, Resend send, `502 UPSTREAM_ERROR` on failure) is
+ * BLOG-16's, built on `withRoute` from `src/lib/http/with-route.ts`.
+ *
+ * TODO(BLOG-16): replace this placeholder with the real contact handler.
  */
-const handler = withRoute(
-  ({ body }) => {
-    if (body.honeypot) {
-      throw new ValidationError('Spam signal detected.', 'BOT_DETECTED');
-    }
-
-    // TODO(BLOG-16): verify body.turnstileToken via src/lib/security/turnstile.ts,
-    // then send via src/lib/email/resend-client.ts, mapping a send failure to
-    // UpstreamError (502 UPSTREAM_ERROR). Nothing from this payload is ever
-    // persisted (decision/contact-form).
-    return NextResponse.json({ ok: true }, { status: 202 });
-  },
-  { bodySchema: contactSchema, bodyLimitBytes: 200_000 },
-);
-
-export const POST = withRateLimit(handler);
+export function POST(): NextResponse {
+  return NextResponse.json(
+    {
+      error: {
+        code: 'NOT_IMPLEMENTED',
+        message: 'The contact form is not available yet.',
+      },
+    },
+    { status: 501 },
+  );
+}
