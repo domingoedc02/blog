@@ -1,0 +1,30 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens: light values by default, dark values applied under
+ * `prefers-color-scheme: dark`. BLOG-15 wires the manual toggle (persisted
+ * override + no-flash script); this file only declares the two palettes.
+ */
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
