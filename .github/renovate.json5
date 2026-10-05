@@ -1,0 +1,49 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+  timezone: "UTC",
+  schedule: ["before 6am on monday"],
+
+  // One grouped PR per ecosystem for minor/patch bumps -- fewer PRs for a
+  // solo author to review. Major bumps and anything touching next/auth.js/
+  // drizzle-orm always get their own PR and are never auto-merged.
+  packageRules: [
+    {
+      matchManagers: ["npm"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "npm minor/patch",
+      automerge: true,
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "github-actions minor/patch",
+      automerge: true,
+    },
+    {
+      matchManagers: ["dockerfile", "docker-compose"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "docker minor/patch",
+      automerge: true,
+    },
+    {
+      matchUpdateTypes: ["major"],
+      automerge: false,
+    },
+    {
+      matchPackageNames: ["next", "next-auth", "@auth/core", "drizzle-orm", "drizzle-kit"],
+      automerge: false,
+      reviewers: ["devops"],
+    },
+  ],
+
+  // Auto-merge is still gated on the quality-gate workflow passing --
+  // Renovate only merges once GitHub's required status checks are green.
+  automergeType: "pr",
+  platformAutomerge: true,
+
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ["security"],
+  },
+}
