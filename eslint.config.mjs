@@ -54,6 +54,15 @@ const eslintConfig = [
     },
   },
   {
+    // Standalone CLI scripts (pnpm db:seed, future db:migrate/db:generate
+    // wrappers) legitimately log progress to stdout -- the no-console
+    // restriction above is for app/route code, not operator-facing tooling.
+    files: ['scripts/**/*.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     ignores: ['node_modules/**', '.next/**', 'out/**', 'build/**', 'next-env.d.ts', 'coverage/**'],
   },
 ];
