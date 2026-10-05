@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 import { ForbiddenError } from '@/lib/errors';
+import { ADMIN_JSON_BODY_LIMIT_BYTES, CONTACT_BODY_LIMIT_BYTES } from '@/lib/security/body-limits';
 import {
   ADMIN_ONLY_HEADERS,
   buildSecurityHeaders,
@@ -49,8 +50,8 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // Per spec/architecture's request-pipeline step 4. `/api/admin/upload`'s
 // 8 MB cap is explicitly out of scope here (this issue's Scope boundary
 // note) — owned by lib/storage/upload.ts (BLOG-25).
-const ADMIN_JSON_BODY_LIMIT_BYTES = 1 * 1024 * 1024;
-const CONTACT_BODY_LIMIT_BYTES = 200 * 1024;
+// Values live in src/lib/security/body-limits.ts, shared with the
+// Route Handler wrapper (src/lib/http/with-route.ts) so both layers agree.
 
 // decision/auth's documented Auth.js v5 cookie name (Secure in
 // production/preview over HTTPS, the non-`__Secure-` prefixed name in
