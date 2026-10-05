@@ -19,10 +19,17 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@tiptap/core": "^2",
+    "@tiptap/extension-image": "^2",
+    "@tiptap/extension-link": "^2",
+    "@tiptap/html": "^2",
+    "@tiptap/starter-kit": "^2",
     "next": "15.5.27",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "sanitize-html": "^2.18.0",
     "server-only": "^0.0.1",
+    "shiki": "^4.5.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -31,6 +38,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/sanitize-html": "^2.16.2",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
     "drizzle-kit": "^0.28.1",
