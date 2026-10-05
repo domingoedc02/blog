@@ -15,6 +15,7 @@ import {
 } from '@/lib/errors';
 import type { ErrorResponse } from '@/lib/errors';
 import { ADMIN_JSON_BODY_LIMIT_BYTES } from '@/lib/security/body-limits';
+import type { Limiter } from '@/lib/security/rate-limit';
 
 import { readLimitedBody } from './body-limit';
 import { logger } from './logger';
@@ -205,26 +206,78 @@ export function withAuth<Context>(route: WrappedRoute<Context>): WrappedRoute<Co
   };
 }
 
+export interface WithRateLimitOptions<Context> {
+  /** One of the named limiters in `src/lib/security/rate-limit.ts`. */
+  limiter: Limiter;
+  /**
+   * Derives the limiter key, usually via `rateLimitKey(request, scope)`.
+   * May throw (e.g. `UnauthenticatedError` for an upload with no session):
+   * the error is mapped like any other and the route is never called.
+   */
+  key: (request: NextRequest, context: Context) => string;
+}
+
 /**
- * Fail-closed composition point for pipeline step 5 (rate limit). Always
- * rejects with 429 until BLOG-9 (abuse protection) lands the real Upstash
- * sliding-window limiter — same fail-closed rationale as {@link withAuth}.
+ * Composition point for pipeline step 5 (rate limit), applied OUTSIDE
+ * {@link withRoute} so an over-limit request is rejected before its body
+ * is read, validated or acted on (decision/contact-form: limit first,
+ * then Turnstile, then everything else).
  *
- * TODO(BLOG-9): replace the body with a real `@upstash/ratelimit` check.
+ *   export const POST = withRateLimit(withRoute(handler, opts), {
+ *     limiter: contactLimiter,
+ *     key: (request) => rateLimitKey(request, 'contact'),
+ *   });
+ *
+ * Denied -> 429 `RATE_LIMITED` with `Retry-After`. If Upstash is down the
+ * limiter itself fails closed to a conservative in-memory count
+ * (BLOG-9). Called WITHOUT options it still fails closed on every
+ * request, exactly like BLOG-29's original stub: an unconfigured limiter
+ * is loud, never silently unlimited.
  */
 export function withRateLimit<Context>(
-  _route: WrappedRoute<Context>,
-  defaultRetryAfterSeconds = 60,
+  route: WrappedRoute<Context>,
+  options?: WithRateLimitOptions<Context>,
 ): WrappedRoute<Context> {
-  // `_route` is deliberately unused: this stub never calls through to the
-  // wrapped route, by design, until BLOG-9 lands the real limiter.
-  return async (_request: NextRequest, _context: Context): Promise<NextResponse> => {
-    const mapped = toErrorResponse(
-      new RateLimitError(
-        'Rate limiting is not wired yet (pending BLOG-9) — failing closed.',
-        defaultRetryAfterSeconds,
-      ),
-    );
-    return errorToNextResponse(mapped);
+  return async (request: NextRequest, context: Context): Promise<NextResponse> => {
+    const requestId = request.headers.get('x-request-id') ?? crypto.randomUUID();
+    const reject = (error: unknown): NextResponse => {
+      const mapped = toErrorResponse(error);
+      logger.warn({
+        requestId,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status: mapped.status,
+        event: 'rate_limit.rejected',
+        limiter: options?.limiter.name ?? 'unconfigured',
+      });
+      const response = errorToNextResponse(mapped);
+      response.headers.set('x-request-id', requestId);
+      return response;
+    };
+
+    if (!options) {
+      return reject(
+        new RateLimitError('Rate limiting is not configured for this route — failing closed.', 60),
+      );
+    }
+
+    // Type-only dependency on rate-limit.ts: calling `limiter.check()`
+    // directly keeps this wrapper free of rate-limit.ts's runtime imports
+    // (Upstash client, env.ts), so importing withRoute never requires the
+    // Upstash env to be present.
+    try {
+      const result = await options.limiter.check(options.key(request, context));
+      if (!result.success) {
+        return reject(
+          new RateLimitError(
+            `Rate limit exceeded for ${options.limiter.name}.`,
+            Math.max(1, Math.ceil(result.retryAfterSeconds)),
+          ),
+        );
+      }
+    } catch (error) {
+      return reject(error);
+    }
+    return route(request, context);
   };
 }
